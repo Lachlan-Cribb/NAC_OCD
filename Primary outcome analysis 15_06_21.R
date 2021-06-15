@@ -6,6 +6,7 @@ library(sjlabelled)
 library(sjPlot)
 library(ggeffects)
 library(extrafont)
+library(brms)
 loadfonts(device = "win")
 
 nac <- read_sav("C:\\Users\\lachy\\OneDrive - The University of Melbourne\\Unimelb\\NAC placebo\\datafiles\\COGNAC data file (2) MERGED 28-Apr-2021.sav")
@@ -165,13 +166,17 @@ nac_long$ctime <- nac_long$time - 4
 # primary outcome model (conditional growth model) 
 
 
-model1 <- lme(YBOCS ~ YBOCS_BL2_total2 + ctime*Group_allocation,
+model1 <- lme(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation,
               random = ~ time | Participant_ID,
               na.action = na.omit, data = nac_long)
 
 summary(model1)
 
+em <- emmeans(model1,
+              pairwise ~ Group_allocation | time, 
+              at = list(time = 4))
 
+em
 
 #### Figure 1 ####
 
@@ -218,11 +223,81 @@ theme_set(theme_linedraw() +
 ggplot(preds, aes(x = x, y = predicted, colour = Treatment)) +
   geom_line(aes(linetype = Treatment)) + 
   geom_pointrange(aes(ymin = conf.low, ymax = conf.high), 
-                  position = position_dodge(width = 0.1)) +
+                  position = position_dodge(width = 0.1),
+                  fatten = 2) +
   scale_x_continuous(labels = c("BL","W4","W8","W12","W16","W20")) +
   xlab("Visit") + ylab("YBOCS ± 95% CI") + 
   ylim(c(12.5,25)) +
   scale_color_manual(values=c("#999999", "#E69F00"))
 
+ggsave("NAC ybocs.png", device = "png", path = "C:/Users/lachy/OneDrive - The University of Melbourne/Unimelb/NAC placebo/Plots")
 
 
+
+
+#### sensitivity pattern mixture model ####
+
+nac <- nac %>% 
+  mutate(drop_early = if_else(is.na(YBOCS_W4_total2) | is.na(YBOCS_W8_total2) &
+                                is.na(YBOCS_W12_total2) & is.na(YBOCS_W16_total2) &
+                                is.na(YBOCS_W20_total2), 1, 0)) %>% 
+  mutate(drop_late = if_else(drop_early == 0 & is.na(YBOCS_W20_total2), 1, 0))
+                                                                 
+
+# long format 
+
+nac_long <- nac %>% 
+  pivot_longer(cols = all_of(ybocs_vars), 
+               names_to = "time", 
+               values_to = "YBOCS")
+
+nac_long <- nac_long %>% 
+  mutate(time = if_else(time == "YBOCS_W4_total2", 0,
+                        if_else(time == "YBOCS_W8_total2", 1,
+                                if_else(time == "YBOCS_W12_total2", 2, 
+                                        if_else(time == "YBOCS_W16_total2", 3, 4)))))
+
+
+## Bayesian pattern mixture model
+
+# priors 
+
+priors <- prior(normal(0,2), class = b)
+
+pm1 <- brm(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation*drop_early + 
+             time*Group_allocation*drop_late + (1 + time | Participant_ID),
+           data = nac_long,
+           prior = priors,
+           seed = 1,
+           cores = 2, chains = 4, iter = 3500, warmup = 1000,
+           control = list(adapt_delta = .95))
+
+
+em1 <- emmeans(pm1,
+               pairwise ~ Group_allocation | time, 
+               CIs = F,
+               at = list(time = 4),
+               weights = "proportional")
+
+em1
+
+summary(pm1)
+
+plot_model(pm1, type = "pred", terms = c("time","Group_allocation",
+                                         "drop_late"))
+
+
+## simple pattern mixture
+
+pm2 <- lme(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation*drop_any,
+              random = ~ time | Participant_ID,
+              na.action = na.omit, data = nac_long)
+
+summary(pm2)
+
+em <- emmeans(pm2,
+              pairwise ~ Group_allocation | time, 
+              at = list(time = 4),
+              weights = "proportional")
+
+em
