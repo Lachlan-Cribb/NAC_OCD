@@ -147,12 +147,12 @@ m1 <- lme(YBOCS ~ YBOCS_BL2_total2 + time,
 m2 <- lme(YBOCS ~ YBOCS_BL2_total2 + time,
           random = ~ time | Participant_ID,
           na.action = na.omit, data = nac_long,
-          correlation = corAR1())
+          correlation = corAR1()) # autoregressive
 
 m3 <- lme(YBOCS ~ YBOCS_BL2_total2 + time,
           random = ~ time | Participant_ID,
           na.action = na.omit, data = nac_long,
-          correlation = corCompSymm())
+          correlation = corCompSymm()) # compound symmetry
 
 anova(m1, m2, m3)
 
@@ -180,18 +180,8 @@ em
 
 #### Figure 1 ####
 
-# refit model with uncentered time for figure #
 
-model_fig <- lme(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation,
-              random = ~ time | Participant_ID,
-              na.action = na.omit, data = nac_long)
-
-
-summary(model_fig)
-
-# model predictions
-
-preds <- ggpredict(model_fig, 
+preds <- ggpredict(model1, 
                    terms = c("time","Group_allocation","YBOCS_BL2_total2 [22.5]"))
 
 
@@ -219,6 +209,7 @@ theme_set(theme_linedraw() +
             theme(text = element_text(family = "Times New Roman"),
                   panel.grid = element_blank()))
 
+# plot 
 
 ggplot(preds, aes(x = x, y = predicted, colour = Treatment)) +
   geom_line(aes(linetype = Treatment)) + 
@@ -230,12 +221,16 @@ ggplot(preds, aes(x = x, y = predicted, colour = Treatment)) +
   ylim(c(12.5,25)) +
   scale_color_manual(values=c("#999999", "#E69F00"))
 
+# save plot to png
 ggsave("NAC ybocs.png", device = "png", path = "C:/Users/lachy/OneDrive - The University of Melbourne/Unimelb/NAC placebo/Plots")
 
 
 
 
 #### sensitivity pattern mixture model ####
+
+# create drop_out indicators
+# drop_early for dropout before W12, drop_late for dropout W12 or later
 
 nac <- nac %>% 
   mutate(drop_early = if_else(is.na(YBOCS_W4_total2) | is.na(YBOCS_W8_total2) &
@@ -262,7 +257,7 @@ nac_long <- nac_long %>%
 
 # priors 
 
-priors <- prior(normal(0,2), class = b)
+priors <- prior(normal(0,2), class = b) # weak shrinkage priors so model is estimable
 
 pm1 <- brm(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation*drop_early + 
              time*Group_allocation*drop_late + (1 + time | Participant_ID),
@@ -272,6 +267,7 @@ pm1 <- brm(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation*drop_early +
            cores = 2, chains = 4, iter = 3500, warmup = 1000,
            control = list(adapt_delta = .95))
 
+# average over missing data patterns 
 
 em1 <- emmeans(pm1,
                pairwise ~ Group_allocation | time, 
@@ -281,20 +277,20 @@ em1 <- emmeans(pm1,
 
 em1
 
-summary(pm1)
-
-plot_model(pm1, type = "pred", terms = c("time","Group_allocation",
-                                         "drop_late"))
-
 
 ## simple pattern mixture
+# Just one dropout indicator (dropout or no)
 
+nac_long$drop_any <- ifelse(nac_long$drop_early == 1 | nac_long$drop_late == 1, 1, 0)
+
+# model
 pm2 <- lme(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation*drop_any,
               random = ~ time | Participant_ID,
               na.action = na.omit, data = nac_long)
 
 summary(pm2)
 
+# average over dropout pattern
 em <- emmeans(pm2,
               pairwise ~ Group_allocation | time, 
               at = list(time = 4),
