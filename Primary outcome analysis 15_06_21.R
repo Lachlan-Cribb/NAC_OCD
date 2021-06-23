@@ -1,21 +1,31 @@
 library(haven)
 library(tidyverse)
-library(psych)
 library(nlme)
-library(sjlabelled)
 library(sjPlot)
+library(sjlabelled)
 library(ggeffects)
 library(extrafont)
 library(brms)
+library(emmeans)
+library(mice)
 loadfonts(device = "win")
 
 nac <- read_sav("C:\\Users\\lachy\\OneDrive - The University of Melbourne\\Unimelb\\NAC placebo\\datafiles\\COGNAC data file (2) MERGED 28-Apr-2021.sav")
 
 
+# remove -9 and -999 SPSS missing data indicators 
+
+nac <- nac %>% 
+  mutate(across(where(is.numeric), ~ na_if(., -9))) %>% 
+  mutate(across(where(is.numeric), ~ na_if(., -999))) %>% 
+  mutate(across(where(is.numeric), ~ na_if(., -99)))
+
+# drop unneeded variable with problematic formatting
+
+nac <- nac[,-890]
 
 #### Primary outcome ####
 
-## check YBOCS variables for errors/outliers
 ## recalculate total scores 
 
 bl_ybocs <- names(nac %>% 
@@ -87,12 +97,12 @@ nac$YBOCS_W20_total2 <- rowSums(nac[,w20_ybocs])
 
 ## Treatment variable 
 
-nac$Group_allocation <- as_label(nac$Group_allocation)
+nac$Group_allocation <- sjlabelled::as_label(nac$Group_allocation)
 
 nac$Group_allocation <- relevel(nac$Group_allocation, "B") # placebo reference group
 
 
-### Change data to long format ###
+### data to long format ###
 
 
 ybocs_vars <- c("YBOCS_W4_total2", "YBOCS_W8_total2", 
@@ -157,12 +167,6 @@ m3 <- lme(YBOCS ~ YBOCS_BL2_total2 + time,
 anova(m1, m2, m3)
 
 
-# zero time variable at final visit
-
-nac_long$ctime <- nac_long$time - 4
-
-
-
 # primary outcome model (conditional growth model) 
 
 
@@ -225,8 +229,6 @@ ggplot(preds, aes(x = x, y = predicted, colour = Treatment)) +
 ggsave("NAC ybocs.png", device = "png", path = "C:/Users/lachy/OneDrive - The University of Melbourne/Unimelb/NAC placebo/Plots")
 
 
-
-
 #### sensitivity pattern mixture model ####
 
 # create drop_out indicators
@@ -253,47 +255,158 @@ nac_long <- nac_long %>%
                                         if_else(time == "YBOCS_W16_total2", 3, 4)))))
 
 
-## Bayesian pattern mixture model
 
-# priors 
+#pattern mixture model 
 
-priors <- prior(normal(0,2), class = b) # weak shrinkage priors so model is estimable
-
-pm1 <- brm(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation*drop_early + 
-             time*Group_allocation*drop_late + (1 + time | Participant_ID),
-           data = nac_long,
-           prior = priors,
-           seed = 1,
-           cores = 2, chains = 4, iter = 3500, warmup = 1000,
-           control = list(adapt_delta = .95))
-
-# average over missing data patterns 
-
-em1 <- emmeans(pm1,
-               pairwise ~ Group_allocation | time, 
-               CIs = F,
-               at = list(time = 4),
-               weights = "proportional")
-
-em1
-
-
-## simple pattern mixture
-# Just one dropout indicator (dropout or no)
-
-nac_long$drop_any <- ifelse(nac_long$drop_early == 1 | nac_long$drop_late == 1, 1, 0)
-
-# model
-pm2 <- lme(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation*drop_any,
+pm1 <- lme(YBOCS ~ YBOCS_BL2_total2 + time*Group_allocation*drop_any,
               random = ~ time | Participant_ID,
               na.action = na.omit, data = nac_long)
 
-summary(pm2)
+summary(pm1)
 
 # average over dropout pattern
-em <- emmeans(pm2,
+em <- emmeans(pm1,
               pairwise ~ Group_allocation | time, 
               at = list(time = 4),
               weights = "proportional")
 
 em
+
+
+#### Per protocol analysis ####
+
+
+
+#### DOCS ####
+
+# check for missing data (repeat for each visit) #
+
+print(nac %>% 
+        rowwise() %>% 
+        mutate(total_na = sum(is.na(c_across(DOCS_W20_contamination_01:DOCS_W20_total)))) %>% 
+        dplyr::select(total_na) %>% 
+        arrange(desc(total_na)), n = 100)
+
+## Impute missing DOCS items ##
+
+# remove labels for MICE imputation
+
+nac_imp <- nac %>% 
+  mutate(across(contains("DOCS"), haven::zap_labels))
+
+# imputation function
+
+docs_impute <- function(vars,max_missing){
+  
+  skip <- which(rowSums(is.na(nac[,vars]))>max_missing) # maximum missing for imputation
+  
+  imp <- mice(data = nac_imp[-skip,vars], m = 1, method = "pmm") # impute
+  
+  imp <- complete(imp) # save as dataframe 
+  
+  nac_imp[-skip,vars] <- imp # replace data with imputed data 
+  
+  nac_imp
+}
+
+
+# BL imputation - skipping participants with more than 50% missing #
+
+bl_docs <- names(nac %>% 
+                   select(DOCS_BL_contamination_01:DOCS_BL_symmetry_05) %>% 
+                   select(-DOCS_BL_contamination_total, -DOCS_BL_harm_total, -DOCS_BL_taboo_total))
+
+
+nac_imp <- docs_impute(vars = bl_docs, max_missing = 12)
+
+
+# week 4
+
+W4_docs <- names(nac %>% 
+                   select(DOCS_W4_contamination_01:DOCS_W4_symmetry_05) %>% 
+                   select(-DOCS_W4_contamination_total, -DOCS_W4_harm_total, -DOCS_W4_taboo_total))
+
+nac_imp <- docs_impute(vars = W4_docs, max_missing = 12)
+
+
+# week 8 
+
+W8_docs <- names(nac %>% 
+                   select(DOCS_W8_contamination_01:DOCS_W8_symmetry_05) %>% 
+                   select(-DOCS_W8_contamination_total, -DOCS_W8_harm_total, -DOCS_W8_taboo_total))
+
+nac_imp <- docs_impute(vars = W8_docs, max_missing = 12)
+
+
+# week 12
+
+W12_docs <- names(nac %>% 
+                   select(DOCS_W12_contamination_01:DOCS_W12_symmetry_05) %>% 
+                   select(-DOCS_W12_contamination_total, -DOCS_W12_harm_total, -DOCS_W12_taboo_total))
+
+nac_imp <- docs_impute(vars = W12_docs, max_missing = 12)
+
+# Week 16 
+
+W16_docs <- nac %>% 
+  select(DOCS_W16_contamination_01:DOCS_W16_symmetry_05) %>% 
+  select(-DOCS_W16_contamination_total, -DOCS_W16_harm_total, -DOCS_W16_taboo_total) %>% 
+  names()
+
+nac_imp <- docs_impute(vars = W16_docs, max_missing = 12)
+
+# week 20
+
+W20_docs <- nac %>% 
+  select(DOCS_W20_contamination_01:DOCS_W20_symmetry_05) %>% 
+  select(-DOCS_W20_contamination_total, -DOCS_W20_harm_total, -DOCS_W20_taboo_total) %>% 
+  names()
+
+nac_imp <- docs_impute(vars = W20_docs, max_missing = 12)
+
+
+## recalculate total scores
+
+nac_imp$DOCS_BL_total2 <- rowSums(nac_imp[,bl_docs])
+
+nac_imp$DOCS_W4_total2 <- rowSums(nac_imp[,W4_docs])
+
+nac_imp$DOCS_W8_total2 <- rowSums(nac_imp[,W8_docs])
+
+nac_imp$DOCS_W12_total2 <- rowSums(nac_imp[,W12_docs])
+
+nac_imp$DOCS_W16_total2 <- rowSums(nac_imp[,W16_docs])
+
+nac_imp$DOCS_W20_total2 <- rowSums(nac_imp[,W20_docs])
+
+
+## DOCS mixed model 
+
+# data to wide format
+
+docs_vars <- c("DOCS_W4_total2", "DOCS_W8_total2", "DOCS_W12_total2", "DOCS_W16_total2", "DOCS_W20_total2")
+
+nac_long_imp <- nac_imp %>% 
+  pivot_longer(cols = all_of(docs_vars), names_to = "Visit", values_to = "DOCS")
+
+# continuous time variable
+
+nac_long_imp$Visit <- factor(nac_long_imp$Visit, levels = unique(nac_long_imp$Visit))
+
+nac_long_imp$Visit <- as.numeric(nac_long_imp$Visit) - 1
+
+
+# model 
+
+docs_m1 <- lme(DOCS ~ Visit * Group_allocation,
+               random = ~ 1 | Participant_ID,
+               na.action = na.omit, data = nac_long_imp)
+
+summary(docs_m1)
+
+em <- emmeans(docs_m1,
+              pairwise ~ Group_allocation | Visit, 
+              at = list(Visit = 4))
+
+em
+
